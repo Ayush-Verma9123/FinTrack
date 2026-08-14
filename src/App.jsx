@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { request } from './api.js';
 
-const currency = new Intl.NumberFormat('en-US', {
+const currency = new Intl.NumberFormat('en-IN', {
   style: 'currency',
-  currency: 'USD',
+  currency: 'INR',
   maximumFractionDigits: 0,
 });
 
-const fullCurrency = new Intl.NumberFormat('en-US', {
+const fullCurrency = new Intl.NumberFormat('en-IN', {
   style: 'currency',
-  currency: 'USD',
+  currency: 'INR',
 });
 
 const emptySummary = {
@@ -146,7 +146,7 @@ function AuthPage({ onAuthenticated }) {
               <span>Available this month</span>
               <span className="balance-dot" />
             </div>
-            <strong>$2,840</strong>
+            <strong>₹2,840</strong>
             <div className="balance-chart">
               <span style={{ height: '30%' }} />
               <span style={{ height: '48%' }} />
@@ -575,7 +575,7 @@ function EntryModal({ entry, onClose, onSave }) {
         <form className="form-grid" onSubmit={submit}>
           <label><span>What are you recording?</span><select name="entryType" value={form.entryType} onChange={update}>{entryTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label>
           <label><span>Category</span><select name="category" value={form.category} onChange={update}>{categories[form.entryType].map((category) => <option key={category}>{category}</option>)}</select></label>
-          <label><span>Amount</span><div className="amount-input"><span>$</span><input name="amount" type="number" value={form.amount} onChange={update} placeholder="0.00" min="0.01" step="0.01" inputMode="decimal" required /></div></label>
+          <label><span>Amount</span><div className="amount-input"><span>₹</span><input name="amount" type="number" value={form.amount} onChange={update} placeholder="0.00" min="0.01" step="0.01" inputMode="decimal" required /></div></label>
           <label><span>Date</span><input name="entryDate" type="date" value={form.entryDate} onChange={update} required /></label>
           <label className="form-full"><span>A note (optional)</span><input name="description" type="text" value={form.description} onChange={update} placeholder="Add a few details" maxLength="180" /></label>
           {error && <p className="form-error form-full" role="alert">{error}</p>}
@@ -610,8 +610,8 @@ function GoalModal({ onClose, onSave }) {
         <div className="modal-heading"><div><p className="eyebrow dark">LOOKING AHEAD</p><h2 id="goal-modal-title">Create a goal</h2></div><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><Icon name="close" size={20} /></button></div>
         <form className="form-grid" onSubmit={submit}>
           <label className="form-full"><span>What are you saving for?</span><input name="name" type="text" value={form.name} onChange={update} placeholder="e.g. A family holiday" maxLength="100" required /></label>
-          <label><span>Goal amount</span><div className="amount-input"><span>$</span><input name="targetAmount" type="number" value={form.targetAmount} onChange={update} placeholder="0.00" min="0.01" step="0.01" inputMode="decimal" required /></div></label>
-          <label><span>Already saved</span><div className="amount-input"><span>$</span><input name="currentAmount" type="number" value={form.currentAmount} onChange={update} placeholder="0.00" min="0" step="0.01" inputMode="decimal" /></div></label>
+          <label><span>Goal amount</span><div className="amount-input"><span>₹</span><input name="targetAmount" type="number" value={form.targetAmount} onChange={update} placeholder="0.00" min="0.01" step="0.01" inputMode="decimal" required /></div></label>
+          <label><span>Already saved</span><div className="amount-input"><span>₹</span><input name="currentAmount" type="number" value={form.currentAmount} onChange={update} placeholder="0.00" min="0" step="0.01" inputMode="decimal" /></div></label>
           <label className="form-full"><span>Target date (optional)</span><input name="targetDate" type="date" value={form.targetDate} onChange={update} /></label>
           {error && <p className="form-error form-full" role="alert">{error}</p>}
           <div className="modal-actions form-full"><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button type="submit" className="button button-primary" disabled={pending}>{pending ? 'Creating...' : 'Create goal'}</button></div>

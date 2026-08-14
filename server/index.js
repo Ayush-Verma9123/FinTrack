@@ -2,7 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
-import { pool, verifyDatabaseConnection } from './db.js';
+import { ObjectId } from 'mongodb';
+import { getDatabase, verifyDatabaseConnection } from './db.js';
 import { createToken, requireAuth } from './auth.js';
 
 dotenv.config();
@@ -13,15 +14,16 @@ const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173')
   .split(',')
   .map((origin) => origin.trim());
 const validTypes = new Set(['income', 'expense', 'savings', 'investment']);
+const maxAmountCents = 999999999999;
 
 app.use(cors({ origin: allowedOrigins }));
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
 
 function cleanString(value, maxLength) {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
 }
 
-function dateForMySql(value) {
+function dateForDatabase(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return null;
   }
@@ -31,17 +33,69 @@ function dateForMySql(value) {
     : value;
 }
 
-function positiveId(value) {
-  const id = Number(value);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
+function objectIdFrom(value) {
+  return typeof value === 'string' && /^[a-f\d]{24}$/i.test(value)
+    ? new ObjectId(value)
+    : null;
+}
+
+function amountToCents(value) {
+  const amount = Number(value);
+  const cents = Math.round(amount * 100);
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(cents) || cents > maxAmountCents) {
+    return null;
+  }
+  return Math.abs(amount * 100 - cents) < 0.000001 ? cents : null;
+}
+
+function nonNegativeAmountToCents(value) {
+  const amount = Number(value);
+  const cents = Math.round(amount * 100);
+  if (!Number.isFinite(amount) || amount < 0 || !Number.isSafeInteger(cents) || cents > maxAmountCents) {
+    return null;
+  }
+  return Math.abs(amount * 100 - cents) < 0.000001 ? cents : null;
+}
+
+function centsToAmount(cents) {
+  return Number(cents || 0) / 100;
+}
+
+function serializeUser(user) {
+  return {
+    id: user._id.toHexString(),
+    name: user.name,
+    email: user.email,
+  };
+}
+
+function serializeEntry(entry) {
+  return {
+    id: entry._id.toHexString(),
+    entryType: entry.entryType,
+    category: entry.category,
+    description: entry.description || null,
+    amount: centsToAmount(entry.amountCents),
+    entryDate: entry.entryDate,
+  };
+}
+
+function serializeGoal(goal) {
+  return {
+    id: goal._id.toHexString(),
+    name: goal.name,
+    targetAmount: centsToAmount(goal.targetAmountCents),
+    currentAmount: centsToAmount(goal.currentAmountCents),
+    targetDate: goal.targetDate || null,
+  };
 }
 
 function entryFromBody(body) {
   const entryType = cleanString(body.entryType, 20);
   const category = cleanString(body.category, 64);
   const description = cleanString(body.description, 180) || null;
-  const amount = Number(body.amount);
-  const entryDate = dateForMySql(body.entryDate);
+  const amountCents = amountToCents(body.amount);
+  const entryDate = dateForDatabase(body.entryDate);
 
   if (!validTypes.has(entryType)) {
     return { error: 'Choose a valid entry type.' };
@@ -49,22 +103,29 @@ function entryFromBody(body) {
   if (!category) {
     return { error: 'Enter a category.' };
   }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { error: 'Enter an amount greater than zero.' };
+  if (!amountCents) {
+    return { error: 'Enter an amount greater than zero with no more than two decimal places.' };
   }
   if (!entryDate) {
     return { error: 'Choose a valid date.' };
   }
 
-  return { entryType, category, description, amount, entryDate };
+  return { entryType, category, description, amountCents, entryDate };
 }
 
-async function entryBelongsToUser(entryId, userId) {
-  const [rows] = await pool.execute(
-    'SELECT id FROM finance_entries WHERE id = ? AND user_id = ?',
-    [entryId, userId],
-  );
-  return rows.length > 0;
+function entryForResponse(id, entry) {
+  return {
+    id: id.toHexString(),
+    entryType: entry.entryType,
+    category: entry.category,
+    description: entry.description,
+    amount: centsToAmount(entry.amountCents),
+    entryDate: entry.entryDate,
+  };
+}
+
+function authenticatedUserId(req) {
+  return objectIdFrom(req.auth.userId);
 }
 
 app.get('/api/health', async (_req, res) => {
@@ -89,15 +150,18 @@ app.post('/api/auth/register', async (req, res, next) => {
       return res.status(400).json({ error: 'Use at least 8 characters for your password.' });
     }
 
+    const database = await getDatabase();
     const passwordHash = await bcrypt.hash(password, 12);
-    const [result] = await pool.execute(
-      'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)',
-      [name, email, passwordHash],
-    );
-    const user = { id: result.insertId, name, email };
-    return res.status(201).json({ user, token: createToken(user) });
+    const result = await database.collection('users').insertOne({
+      name,
+      email,
+      passwordHash,
+      createdAt: new Date(),
+    });
+    const user = { _id: result.insertedId, name, email };
+    return res.status(201).json({ user: serializeUser(user), token: createToken(serializeUser(user)) });
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
+    if (error.code === 11000) {
       return res.status(409).json({ error: 'An account with that email already exists.' });
     }
     return next(error);
@@ -108,17 +172,14 @@ app.post('/api/auth/login', async (req, res, next) => {
   try {
     const email = cleanString(req.body.email, 160).toLowerCase();
     const password = String(req.body.password || '');
-    const [rows] = await pool.execute(
-      'SELECT id, name, email, password_hash FROM users WHERE email = ?',
-      [email],
-    );
-    const account = rows[0];
+    const database = await getDatabase();
+    const account = await database.collection('users').findOne({ email });
 
-    if (!account || !(await bcrypt.compare(password, account.password_hash))) {
+    if (!account || !(await bcrypt.compare(password, account.passwordHash))) {
       return res.status(401).json({ error: 'Email or password is not correct.' });
     }
 
-    const user = { id: account.id, name: account.name, email: account.email };
+    const user = serializeUser(account);
     return res.json({ user, token: createToken(user) });
   } catch (error) {
     return next(error);
@@ -127,14 +188,19 @@ app.post('/api/auth/login', async (req, res, next) => {
 
 app.get('/api/me', requireAuth, async (req, res, next) => {
   try {
-    const [rows] = await pool.execute(
-      'SELECT id, name, email FROM users WHERE id = ?',
-      [req.auth.userId],
+    const userId = authenticatedUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'Your session has expired. Please sign in again.' });
+    }
+    const database = await getDatabase();
+    const user = await database.collection('users').findOne(
+      { _id: userId },
+      { projection: { name: 1, email: 1 } },
     );
-    if (!rows[0]) {
+    if (!user) {
       return res.status(404).json({ error: 'Account not found.' });
     }
-    return res.json({ user: rows[0] });
+    return res.json({ user: serializeUser(user) });
   } catch (error) {
     return next(error);
   }
@@ -142,15 +208,16 @@ app.get('/api/me', requireAuth, async (req, res, next) => {
 
 app.get('/api/entries', requireAuth, async (req, res, next) => {
   try {
-    const [rows] = await pool.execute(
-      `SELECT id, entry_type AS entryType, category, description, amount,
-        DATE_FORMAT(entry_date, '%Y-%m-%d') AS entryDate
-       FROM finance_entries
-       WHERE user_id = ?
-       ORDER BY entry_date DESC, id DESC`,
-      [req.auth.userId],
-    );
-    return res.json({ entries: rows });
+    const userId = authenticatedUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'Your session has expired. Please sign in again.' });
+    }
+    const database = await getDatabase();
+    const entries = await database.collection('financeEntries')
+      .find({ userId })
+      .sort({ entryDate: -1, _id: -1 })
+      .toArray();
+    return res.json({ entries: entries.map(serializeEntry) });
   } catch (error) {
     return next(error);
   }
@@ -158,17 +225,24 @@ app.get('/api/entries', requireAuth, async (req, res, next) => {
 
 app.post('/api/entries', requireAuth, async (req, res, next) => {
   try {
+    const userId = authenticatedUserId(req);
     const entry = entryFromBody(req.body);
+    if (!userId) {
+      return res.status(401).json({ error: 'Your session has expired. Please sign in again.' });
+    }
     if (entry.error) {
       return res.status(400).json({ error: entry.error });
     }
-    const [result] = await pool.execute(
-      `INSERT INTO finance_entries
-        (user_id, entry_type, category, description, amount, entry_date)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [req.auth.userId, entry.entryType, entry.category, entry.description, entry.amount, entry.entryDate],
-    );
-    return res.status(201).json({ entry: { id: result.insertId, ...entry } });
+
+    const database = await getDatabase();
+    const now = new Date();
+    const result = await database.collection('financeEntries').insertOne({
+      userId,
+      ...entry,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return res.status(201).json({ entry: entryForResponse(result.insertedId, entry) });
   } catch (error) {
     return next(error);
   }
@@ -176,21 +250,25 @@ app.post('/api/entries', requireAuth, async (req, res, next) => {
 
 app.put('/api/entries/:id', requireAuth, async (req, res, next) => {
   try {
-    const id = positiveId(req.params.id);
+    const userId = authenticatedUserId(req);
+    const entryId = objectIdFrom(req.params.id);
     const entry = entryFromBody(req.body);
-    if (!id || !(await entryBelongsToUser(id, req.auth.userId))) {
+    if (!userId || !entryId) {
       return res.status(404).json({ error: 'Entry not found.' });
     }
     if (entry.error) {
       return res.status(400).json({ error: entry.error });
     }
-    await pool.execute(
-      `UPDATE finance_entries
-       SET entry_type = ?, category = ?, description = ?, amount = ?, entry_date = ?
-       WHERE id = ? AND user_id = ?`,
-      [entry.entryType, entry.category, entry.description, entry.amount, entry.entryDate, id, req.auth.userId],
+
+    const database = await getDatabase();
+    const result = await database.collection('financeEntries').updateOne(
+      { _id: entryId, userId },
+      { $set: { ...entry, updatedAt: new Date() } },
     );
-    return res.json({ entry: { id, ...entry } });
+    if (!result.matchedCount) {
+      return res.status(404).json({ error: 'Entry not found.' });
+    }
+    return res.json({ entry: entryForResponse(entryId, entry) });
   } catch (error) {
     return next(error);
   }
@@ -198,15 +276,15 @@ app.put('/api/entries/:id', requireAuth, async (req, res, next) => {
 
 app.delete('/api/entries/:id', requireAuth, async (req, res, next) => {
   try {
-    const id = positiveId(req.params.id);
-    if (!id) {
+    const userId = authenticatedUserId(req);
+    const entryId = objectIdFrom(req.params.id);
+    if (!userId || !entryId) {
       return res.status(404).json({ error: 'Entry not found.' });
     }
-    const [result] = await pool.execute(
-      'DELETE FROM finance_entries WHERE id = ? AND user_id = ?',
-      [id, req.auth.userId],
-    );
-    if (!result.affectedRows) {
+
+    const database = await getDatabase();
+    const result = await database.collection('financeEntries').deleteOne({ _id: entryId, userId });
+    if (!result.deletedCount) {
       return res.status(404).json({ error: 'Entry not found.' });
     }
     return res.status(204).send();
@@ -217,33 +295,51 @@ app.delete('/api/entries/:id', requireAuth, async (req, res, next) => {
 
 app.get('/api/dashboard', requireAuth, async (req, res, next) => {
   try {
-    const [summaryRows] = await pool.execute(
-      `SELECT
-        COALESCE(SUM(CASE WHEN entry_type = 'income' THEN amount ELSE 0 END), 0) AS income,
-        COALESCE(SUM(CASE WHEN entry_type = 'expense' THEN amount ELSE 0 END), 0) AS expenses,
-        COALESCE(SUM(CASE WHEN entry_type = 'savings' THEN amount ELSE 0 END), 0) AS savings,
-        COALESCE(SUM(CASE WHEN entry_type = 'investment' THEN amount ELSE 0 END), 0) AS investments
-       FROM finance_entries WHERE user_id = ?`,
-      [req.auth.userId],
-    );
-    const [categoryRows] = await pool.execute(
-      `SELECT category, SUM(amount) AS amount
-       FROM finance_entries
-       WHERE user_id = ? AND entry_type = 'expense'
-       GROUP BY category
-       ORDER BY amount DESC
-       LIMIT 5`,
-      [req.auth.userId],
-    );
-    const [goalRows] = await pool.execute(
-      `SELECT id, name, target_amount AS targetAmount, current_amount AS currentAmount,
-        DATE_FORMAT(target_date, '%Y-%m-%d') AS targetDate
-       FROM financial_goals WHERE user_id = ? ORDER BY created_at DESC`,
-      [req.auth.userId],
-    );
-    const summary = summaryRows[0];
-    summary.balance = Number(summary.income) - Number(summary.expenses) - Number(summary.savings) - Number(summary.investments);
-    return res.json({ summary, categories: categoryRows, goals: goalRows });
+    const userId = authenticatedUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'Your session has expired. Please sign in again.' });
+    }
+    const database = await getDatabase();
+    const [summaryRows, categoryRows, goals] = await Promise.all([
+      database.collection('financeEntries').aggregate([
+        { $match: { userId } },
+        {
+          $group: {
+            _id: null,
+            income: { $sum: { $cond: [{ $eq: ['$entryType', 'income'] }, '$amountCents', 0] } },
+            expenses: { $sum: { $cond: [{ $eq: ['$entryType', 'expense'] }, '$amountCents', 0] } },
+            savings: { $sum: { $cond: [{ $eq: ['$entryType', 'savings'] }, '$amountCents', 0] } },
+            investments: { $sum: { $cond: [{ $eq: ['$entryType', 'investment'] }, '$amountCents', 0] } },
+          },
+        },
+      ]).toArray(),
+      database.collection('financeEntries').aggregate([
+        { $match: { userId, entryType: 'expense' } },
+        { $group: { _id: '$category', amountCents: { $sum: '$amountCents' } } },
+        { $sort: { amountCents: -1 } },
+        { $limit: 5 },
+      ]).toArray(),
+      database.collection('financialGoals')
+        .find({ userId })
+        .sort({ createdAt: -1 })
+        .toArray(),
+    ]);
+    const summaryCents = summaryRows[0] || { income: 0, expenses: 0, savings: 0, investments: 0 };
+    const summary = {
+      income: centsToAmount(summaryCents.income),
+      expenses: centsToAmount(summaryCents.expenses),
+      savings: centsToAmount(summaryCents.savings),
+      investments: centsToAmount(summaryCents.investments),
+    };
+    summary.balance = summary.income - summary.expenses - summary.savings - summary.investments;
+    return res.json({
+      summary,
+      categories: categoryRows.map((category) => ({
+        category: category._id,
+        amount: centsToAmount(category.amountCents),
+      })),
+      goals: goals.map(serializeGoal),
+    });
   } catch (error) {
     return next(error);
   }
@@ -251,13 +347,16 @@ app.get('/api/dashboard', requireAuth, async (req, res, next) => {
 
 app.get('/api/goals', requireAuth, async (req, res, next) => {
   try {
-    const [goals] = await pool.execute(
-      `SELECT id, name, target_amount AS targetAmount, current_amount AS currentAmount,
-        DATE_FORMAT(target_date, '%Y-%m-%d') AS targetDate
-       FROM financial_goals WHERE user_id = ? ORDER BY created_at DESC`,
-      [req.auth.userId],
-    );
-    return res.json({ goals });
+    const userId = authenticatedUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'Your session has expired. Please sign in again.' });
+    }
+    const database = await getDatabase();
+    const goals = await database.collection('financialGoals')
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .toArray();
+    return res.json({ goals: goals.map(serializeGoal) });
   } catch (error) {
     return next(error);
   }
@@ -265,18 +364,33 @@ app.get('/api/goals', requireAuth, async (req, res, next) => {
 
 app.post('/api/goals', requireAuth, async (req, res, next) => {
   try {
+    const userId = authenticatedUserId(req);
     const name = cleanString(req.body.name, 100);
-    const targetAmount = Number(req.body.targetAmount);
-    const currentAmount = Number(req.body.currentAmount || 0);
-    const targetDate = req.body.targetDate ? dateForMySql(req.body.targetDate) : null;
-    if (!name || !Number.isFinite(targetAmount) || targetAmount <= 0 || !Number.isFinite(currentAmount) || currentAmount < 0 || (req.body.targetDate && !targetDate)) {
+    const targetAmountCents = amountToCents(req.body.targetAmount);
+    const currentAmountCents = req.body.currentAmount === '' || req.body.currentAmount === undefined
+      ? 0
+      : nonNegativeAmountToCents(req.body.currentAmount);
+    const targetDate = req.body.targetDate ? dateForDatabase(req.body.targetDate) : null;
+    if (!userId) {
+      return res.status(401).json({ error: 'Your session has expired. Please sign in again.' });
+    }
+    if (!name || !targetAmountCents || currentAmountCents === null || (req.body.targetDate && !targetDate)) {
       return res.status(400).json({ error: 'Enter a goal name and valid amounts.' });
     }
-    const [result] = await pool.execute(
-      'INSERT INTO financial_goals (user_id, name, target_amount, current_amount, target_date) VALUES (?, ?, ?, ?, ?)',
-      [req.auth.userId, name, targetAmount, currentAmount, targetDate],
-    );
-    return res.status(201).json({ goal: { id: result.insertId, name, targetAmount, currentAmount, targetDate } });
+
+    const database = await getDatabase();
+    const now = new Date();
+    const goal = {
+      userId,
+      name,
+      targetAmountCents,
+      currentAmountCents,
+      targetDate,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = await database.collection('financialGoals').insertOne(goal);
+    return res.status(201).json({ goal: serializeGoal({ _id: result.insertedId, ...goal }) });
   } catch (error) {
     return next(error);
   }
@@ -284,15 +398,15 @@ app.post('/api/goals', requireAuth, async (req, res, next) => {
 
 app.delete('/api/goals/:id', requireAuth, async (req, res, next) => {
   try {
-    const id = positiveId(req.params.id);
-    if (!id) {
+    const userId = authenticatedUserId(req);
+    const goalId = objectIdFrom(req.params.id);
+    if (!userId || !goalId) {
       return res.status(404).json({ error: 'Goal not found.' });
     }
-    const [result] = await pool.execute(
-      'DELETE FROM financial_goals WHERE id = ? AND user_id = ?',
-      [id, req.auth.userId],
-    );
-    if (!result.affectedRows) {
+
+    const database = await getDatabase();
+    const result = await database.collection('financialGoals').deleteOne({ _id: goalId, userId });
+    if (!result.deletedCount) {
       return res.status(404).json({ error: 'Goal not found.' });
     }
     return res.status(204).send();

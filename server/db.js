@@ -1,25 +1,39 @@
-import mysql from 'mysql2/promise';
+import { MongoClient } from 'mongodb';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-export const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'fintrack',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  decimalNumbers: true,
-});
+const client = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
+const databaseName = process.env.MONGODB_DB_NAME || 'fintrack';
+let databasePromise;
+
+async function connectDatabase() {
+  await client.connect();
+  const database = client.db(databaseName);
+
+  // MongoDB creates these collections and indexes automatically on first use.
+  await Promise.all([
+    database.collection('users').createIndex({ email: 1 }, { unique: true }),
+    database.collection('financeEntries').createIndex({ userId: 1, entryDate: -1, _id: -1 }),
+    database.collection('financeEntries').createIndex({ userId: 1, entryType: 1 }),
+    database.collection('financialGoals').createIndex({ userId: 1, createdAt: -1 }),
+    database.collection('budgets').createIndex({ userId: 1, category: 1 }, { unique: true }),
+  ]);
+
+  return database;
+}
+
+export function getDatabase() {
+  if (!databasePromise) {
+    databasePromise = connectDatabase().catch((error) => {
+      databasePromise = undefined;
+      throw error;
+    });
+  }
+  return databasePromise;
+}
 
 export async function verifyDatabaseConnection() {
-  const connection = await pool.getConnection();
-  try {
-    await connection.ping();
-  } finally {
-    connection.release();
-  }
+  const database = await getDatabase();
+  await database.command({ ping: 1 });
 }

@@ -5,7 +5,7 @@ FinTrack is a full-stack personal finance dashboard for recording income, expens
 ## Included
 
 - Account creation and sign-in with hashed passwords and JWT sessions
-- MySQL-backed, per-user finance entries
+- MongoDB-backed, per-user finance entries
 - Dashboard totals for available money, income, expenses, savings, and investments
 - Spending-by-category overview
 - Savings and financial goals
@@ -16,39 +16,39 @@ FinTrack is a full-stack personal finance dashboard for recording income, expens
 
 - Frontend: React and Vite
 - Backend: Express
-- Database: MySQL 8+
+- Database: MongoDB (local installation or MongoDB Atlas)
 - Authentication: bcryptjs and JSON Web Tokens
 
 ## Run Locally
 
-1. Install MySQL 8 or newer and make sure its server is running.
-2. Create the database and tables:
+1. Set up MongoDB using one of these options:
 
-   ```bash
-   mysql -u root -p < database/schema.sql
-   ```
+   - Local MongoDB Community Server: install it and make sure the MongoDB service is running.
+   - MongoDB Atlas: create a free cluster at [mongodb.com/atlas](https://www.mongodb.com/atlas), create a database user, allow your current IP address under Network Access, then copy the Node.js connection string.
 
-3. Create `.env` from `.env.example`, then set your actual MySQL password and a long, private JWT secret.
+2. Create `.env` from `.env.example`, then set your MongoDB connection string and a long, private JWT secret.
 
    ```env
-   DB_HOST=localhost
-   DB_PORT=3306
-   DB_USER=root
-   DB_PASSWORD=your_mysql_password
-   DB_NAME=fintrack
+   # Local MongoDB
+   MONGODB_URI=mongodb://127.0.0.1:27017
+
+   # Or MongoDB Atlas
+   # MONGODB_URI=mongodb+srv://YOUR_USERNAME:YOUR_PASSWORD@YOUR_CLUSTER.mongodb.net/?retryWrites=true&w=majority
+
+   MONGODB_DB_NAME=fintrack
    JWT_SECRET=replace_with_a_long_random_secret
    CLIENT_URL=http://localhost:5173
    VITE_API_URL=http://localhost:3001/api
    ```
 
-4. Install dependencies and start the frontend and API together:
+3. Install dependencies and start the frontend and API together:
 
    ```bash
    npm install
    npm run dev
    ```
 
-5. Open `http://localhost:5173`, create an account, and add transactions. Entries and goals are saved in MySQL.
+4. Open `http://localhost:5173`, create an account, and add transactions. MongoDB creates the `fintrack` database, collections, and indexes automatically on first use.
 
 ## Separate Commands
 
